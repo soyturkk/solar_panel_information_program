@@ -42,7 +42,7 @@ data = hava_durumu_getir(sehir_coords[sehir]['lat'], sehir_coords[sehir]['lon'])
 saatlik_radyasyon = data['shortwave_radiation']
 saatlik_dis_sicaklik = data['temperature_2m']
 
-# --- 4. HESAPLAMA MOTORU (2D Grafik İçin) ---
+# --- 4. HESAPLAMA MOTORU ---
 sistem_verimi = 0.45 
 aci_duzeltme = 0.85
 h_dis = 10 
@@ -54,28 +54,38 @@ u_degeri = 1 / r_toplam
 yuzey_alani = 1.5 + (depo_hacmi / 500)
 su_sicakligi = 18.0 
 sicaklik_gecmisi = []
+
+# Sankey ve Metrikler için Sayaçlar
 toplam_kazanc_joule = 0
+toplam_kayip_joule = 0
 
 for i in range(24):
+    # Giriş Isısı (Güneş)
     q_in = (panel_sayisi * panel_birim_alan) * saatlik_radyasyon[i] * sistem_verimi * aci_duzeltme * 3600
     toplam_kazanc_joule += q_in
-    q_out = u_degeri * yuzey_alani * (su_sicakligi - saatlik_dis_sicaklik[i]) * 3600
     
+    # Çıkış Isısı (Yalıtım Kaybı)
+    q_out = u_degeri * yuzey_alani * (su_sicakligi - saatlik_dis_sicaklik[i]) * 3600
+    toplam_kayip_joule += max(0, q_out) # Sadece dışarı giden ısıyı kayıp sayıyoruz
+    
+    # Duş Kullanımı
     if i == dus_saati:
         harcanan_su = kisi_sayisi * 50
         if harcanan_su > 0:
             if harcanan_su > depo_hacmi: harcanan_su = depo_hacmi
             su_sicakligi = ((depo_hacmi - harcanan_su) * su_sicakligi + (harcanan_su * 18)) / depo_hacmi
 
+    # Net Enerji Dengesi
     net_q = q_in - q_out
     delta_t = net_q / (depo_hacmi * 4186)
     su_sicakligi += delta_t
     
+    # Sınırlandırmalar
     if su_sicakligi > 99.0: su_sicakligi = 99.0
     if su_sicakligi < 18.0: su_sicakligi = 18.0
     sicaklik_gecmisi.append(round(su_sicakligi, 2))
 
-# --- 5. GÖRSELLEŞTİRME (Zamana Bağlı Çizgi Grafiği) ---
+# --- 5. GÖRSELLEŞTİRME (Çizgi Grafik) ---
 df = pd.DataFrame({
     "Saat": [f"{h:02d}:00" for h in range(24)],
     "Su Sıcaklığı (°C)": sicaklik_gecmisi,
@@ -87,53 +97,73 @@ fig = px.line(df, x="Saat", y=["Su Sıcaklığı (°C)", "Dış Hava Sıcaklığ
               color_discrete_map={"Su Sıcaklığı (°C)": "red", "Dış Hava Sıcaklığı (°C)": "blue"})
 st.plotly_chart(fig, use_container_width=True)
 
-# Sonuç Metrikleri
+# Özet Metrikler
 st.subheader("📊 Özet Analiz")
 c1, c2, c3 = st.columns(3)
 c1.metric("Max Su Sıcaklığı", f"{max(sicaklik_gecmisi)} °C")
-c2.metric("Toplam Tasarruf (kWh)", f"{toplam_kazanc_joule/3600000:.2f}")
-c3.metric("Ekonomik Kazanç (TL)", f"{(toplam_kazanc_joule/3600000)*2.6:.2f}")
+c2.metric("Günlük Toplam Kazanç", f"{toplam_kazanc_joule/3600000:.2f} kWh")
+c3.metric("Ekonomik Kazanç (TL)", f"{(toplam_kazanc_joule/3600000)*2.6:.2f} TL")
 
-# --- 6. YENİ BÖLÜM: ISI HARİTASI (CONTOUR PLOT) ---
+# --- 6. YENİ BÖLÜM: ENERJİ AKIŞI (SANKEY DIAGRAM) ---
+st.markdown("---")
+st.subheader("📊 Günlük Toplam Enerji Akışı (Sankey Analizi)")
+st.write("Güneşten gelen enerjinin ne kadarının depoda kaldığını ve ne kadarının çevreye 'eriyerek' gittiğini görün.")
+
+q_in_kwh = toplam_kazanc_joule / 3600000
+q_out_kwh = toplam_kayip_joule / 3600000
+q_net_kwh = max(0, q_in_kwh - q_out_kwh)
+
+fig_sankey = go.Figure(data=[go.Sankey(
+    node = dict(
+      pad = 20,
+      thickness = 30,
+      line = dict(color = "black", width = 0.5),
+      label = [
+          f"Güneş Girişi ({q_in_kwh:.1f} kWh)", 
+          f"Isı Kaybı ({q_out_kwh:.1f} kWh)", 
+          f"Faydalı Isı ({q_net_kwh:.1f} kWh)"
+      ],
+      color = ["#FFD700", "#FF4B4B", "#00CC96"] # Altın, Kırmızı, Yeşil
+    ),
+    link = dict(
+      source = [0, 0], # Girişten çıkışlara
+      target = [1, 2], # 1: Kayıp, 2: Depo
+      value = [q_out_kwh, q_net_kwh]
+  ))])
+
+fig_sankey.update_layout(height=400)
+st.plotly_chart(fig_sankey, use_container_width=True)
+
+# --- 7. ISI HARİTASI (CONTOUR PLOT) ---
 st.markdown("---")
 st.subheader("🗺️ Sistem Tasarım ve Optimizasyon Haritası")
-st.write("Bu harita, farklı panel sayıları ve yalıtım kalınlıkları için ulaşılabilecek 'maksimum sıcaklık' değerlerini gösterir. Çizgiler üzerindeki rakamlar sıcaklık değerleridir.")
 
-# 3D matris verilerini Contour için hazırlayalım
 p_ekseni = np.linspace(1, 6, 20) 
 y_ekseni = np.linspace(1, 15, 20)
 P, Y = np.meshgrid(p_ekseni, y_ekseni)
 
-ort_rad = sum(saatlik_radyasyon) / len(saatlik_radyasyon)
+# Harita için gerçekçi etkin radyasyon hesabı
+gunesli_saatler = [r for r in saatlik_radyasyon if r > 0]
+etkin_rad = sum(gunesli_saatler) / len(gunesli_saatler) if gunesli_saatler else 0
 
 def simule_max_temp(p, y):
     u_lokal = 1 / ((1/10) + (y/100/0.04))
-    isi_kazanc = (p * 1.9) * ort_rad * sistem_verimi * aci_duzeltme
-    isi_kayip = u_lokal * 1.8 * (50 - 20)
-    t_max = 18 + ((isi_kazanc - isi_kayip) * 8 * 3600 / (depo_hacmi * 4186))
-    return min(max(t_max, 18), 99)
+    # Ortalama güneşli saat süresince (yaklaşık 10 saat) biriken ısı
+    isi_kazanc = (p * 1.9) * etkin_rad * sistem_verimi * aci_duzeltme
+    isi_kayip = u_lokal * 1.8 * (40 - 20)
+    t_artis = (isi_kazanc - isi_kayip) * 8 * 3600 / (depo_hacmi * 4186)
+    return min(max(18 + t_artis, 18), 99)
 
 Z = np.vectorize(simule_max_temp)(P, Y)
 
-# Contour Plot Oluşturma
 fig_contour = go.Figure(data=go.Contour(
-    z=Z, 
-    x=p_ekseni, 
-    y=y_ekseni, 
+    z=Z, x=p_ekseni, y=y_ekseni, 
     colorscale='Hot',
-    contours=dict(
-        showlabels=True, # Çizgilerin üzerine sıcaklık değerlerini yazar
-        labelfont=dict(size=12, color='white')
-    ),
+    contours=dict(showlabels=True, labelfont=dict(size=12, color='white')),
     colorbar=dict(title="Max T (°C)")
 ))
 
-fig_contour.update_layout(
-    xaxis_title="Panel Sayısı (Adet)",
-    yaxis_title="Yalıtım Kalınlığı (cm)",
-    height=600
-)
-
+fig_contour.update_layout(xaxis_title="Panel Sayısı (Adet)", yaxis_title="Yalıtım Kalınlığı (cm)", height=600)
 st.plotly_chart(fig_contour, use_container_width=True)
 
-st.info("💡 Mühendislik Notu: Haritadaki eğriler (izotermler), aynı sıcaklığı veren farklı tasarım kombinasyonlarını gösterir. Örneğin; daha az panelle daha çok yalıtım yaparak aynı sıcaklığı nasıl yakalayabileceğinizi buradan görebilirsiniz.")
+st.info("💡 Mühendislik Notu: Sankey diyagramı 24 saatlik toplam enerji dengesini gösterirken; Isı Haritası farklı donanım kombinasyonlarının performans limitlerini analiz etmenizi sağlar.")
